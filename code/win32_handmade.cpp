@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <stdio.h>
+#include <stdint.h>
 
 
 // Casey does something intresting and uses #define to define static to the three different things static can mean to make it clearer to himself.
@@ -20,6 +21,19 @@
 #define local_persist static 
 #define global_variable static
 
+// Getting rid of this god awful hungarian notation
+typedef uint8_t uint8;
+typedef uint16_t uint16;
+typedef uint32_t uint32;
+typedef uint64_t uint64;
+
+typedef int8_t int8;
+typedef int16_t int16;
+typedef int32_t int32;
+typedef int64_t int64;
+
+
+
 // DIB - Stands for device independent bitmap. 
 // In windows terminology anway.
 
@@ -34,30 +48,109 @@ global_variable BITMAPINFO bitmap_info;
 // The actual pointer to memory where our DIB will be written to.	
 global_variable	void *bitmap_memory;
 
-// The actual handle to our bitmap. Essential serves as our back buffer.
-global_variable HBITMAP bitmap_handle;
+global_variable int bitmap_height;
+global_variable int bitmap_width;
+global_variable int bytes_per_pixel = 4;
 
-global_variable HDC bitmap_device_context;
+// Function that finally renders stuff to the screen. WE DID IT.
+private_function void render_weird_gradient(int blue_offset, int green_offset) {
 
+	int width = bitmap_width;
+	int height = bitmap_height;
+
+	int pitch = bitmap_width * bytes_per_pixel;
+	// Cast our void pointer to an unsigned 8 bit integer pointer
+	// This in effect moves our pointer 8 bits when we do arthmetic.
+	// Which lines up well to when we want to get the next row via the pitch calculation
+	// TODO COME BACK TO THIS DEFINITION
+	uint8 *row = (uint8*)bitmap_memory;
+
+	// For loop to set individual pixel colors to see if it works
+	for (int y = 0; y < bitmap_height; ++y) {
+
+		uint32 *pixel = (uint32*)row;
+
+		for (int x = 0; x < bitmap_width; ++x) {
+
+			// LITTLE ENDIAN ARCHITECTURE
+			// lower bytes that make up large data appears first. So 
+			// 00000000 10000000
+			// 10000000 will appear first 
+			// SO to get a red value, we set the second to last byte since its essentially flipped.
+
+			// Some windows history here. Since windows is on a LITTLE ENDIAN architecture,
+			// they decided to flip the bit values in a bitmap to BBGGRRxx so if would naturally flip in the proccesor to RRGGBBxx 
+
+			uint8 blue  = (x + blue_offset);
+			uint8 green = (y + green_offset);
+
+			// Memory:  BB GG RR xx
+			// Register: xx RR GG BB
+			*pixel = (green << 8 | blue);
+
+			++pixel;
+
+
+		}
+		row += pitch;
+	}
+
+}
 
 private_function void win32_resize_dib_section(int width, int height) {
 
-	// Frees the memory of our bitmap_handle if the function was called before.
-	if(bitmap_handle != NULL) {
-		DeleteObject(bitmap_handle);
+	// If our bitmap_memory has been allocated, we free our memory first so we don't have leaks.
+
+	if(bitmap_memory != NULL) {
+		// Opposite of VirtualRelease
+		VirtualFree(bitmap_memory, 0, MEM_RELEASE);
 	}
-	if(bitmap_device_context == NULL) {
-		// Get our device context via weird Windows magic
-		bitmap_device_context = CreateCompatibleDC(0);
-	}
+	
+	// Save the bitmap width/height values to a global variable for further updates in win32_update_window function
+	// Since, when we call that function, we are resizing our bitmap, we need its dimensions so we can properly
+	// translate from the source(the window and its dimensions) and the destination(bitmap)
+	bitmap_width = width;
+	bitmap_height = height;
 
 	// Set values for the BITMAPINFOHEADER struct - which contains info about the dimensions and color format of a DIB.
 	bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
-	bitmap_info.bmiHeader.biWidth = width;
-	bitmap_info.bmiHeader.biWidth = height;
+	bitmap_info.bmiHeader.biWidth = bitmap_width;
+
+	// THIS IS MADNESS
+	// So, this may seem insane at glance but there is a reason for it.
+	// The sign of the bitmap height determines if the bitmap is a bottom-up DIB(POSITIVE) or a top-down DIB(NEGATIVE)
+	// This simply means where the origin of the coordiates for the bitmap starts and what it represents at the start of your bitmap memory address.
+	// If bottom-up, the origin will start in the lower left corner(Think typically graphs in math) and the start of our memory address will represent that origin in that corner
+	// If top-down, the origin will start in the upper left corner(The way people in CS typically think of windows origins) and the start of our memory address will represent that origin in that corner
+	
+	// This also impacts how we will get info from our bitmap and how we want to traverse our memory address for info via our stride offset.
+	// Since memory is 1D and we are trying to map a 2D image to it, we need a way to traverse and map back to 2D, which is our stride offset.
+	// NOTE: For more confusion, stride is also called pitch so don't get confused if you see them somewhere is the code.
+
+	// A stride offset is what it takes for us to get from a chunk of memory that represents a row in a 2D image, to get to next row in memory.
+	// And the reason for this has to do with two things: bits per pixel and pixel depth.
+	// For example typical RGB images pixels are stored typically in 32 bits per pixel since that is natural for the processor to manage.
+	// However, RBG has a pixel depth of 24 bits, the actual amount needed to store pixel data, 8bits each for red, green and blue.
+	// THIS MEANS, in memory, if you have your first pixel, we only want the first 24 bits in memory for our pixel data. The last 8 bits is padding because we want performant 
+	// operations on the CPU so we used a 32 bit storage unit. And every pixel has that problem.
+	// So to get to the next row, we need an offset because the actual data and the container we are storing it in doesn't match up. That is stride.  
+
+
+	// IF this makes no sense check this out too for more info on stride https://www.collabora.com/news-and-blog/blog/2016/02/16/a-programmers-view-on-digital-images-the-essentials/
+	// See https://docs.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-bitmapinfoheader if you need some more info on all this nonsense or stride
+ 
+	// CASEY prefers top-down and so do I since that is how I was taught to think of it so besides that and the paragraph I wrote above on why this is important, we are going with negative.
+	// JUST understand the implications of this.
+	bitmap_info.bmiHeader.biHeight= -bitmap_height;
 	bitmap_info.bmiHeader.biPlanes = 1;
 	
 	// Sets the number of bits per pixel we get. Usually for RGB you need 24 but Casey says we need 32 for later so that will be fun TODO
+	// EPISODE 5 - Casey brought up unaligned byte accessing / alignment, basically when accessing increments of bytes that doesn't align up naturally with what the processor typically likes to handle,
+	// YOU HAVE PERFORMANCE PENALITES
+	// SEE the linux kernal docs for more info
+	// https://www.kernel.org/doc/Documentation/unaligned-memory-access.txt
+	// UPDATE - biBitCount is a DWORD(32) bits. SO we make it 32 bits so its natural to get the next value of the pixel instead of having to jump through shit if we had
+	// something like 24 bits. The processer would have to jump extra bits to get to the next value in memory
 	bitmap_info.bmiHeader.biBitCount = 32;
 
 	// uncompressed bitmap format.
@@ -65,30 +158,24 @@ private_function void win32_resize_dib_section(int width, int height) {
 	// Used to specify the size of the image so compressed formats know what they are uncompressing to. For us it doesn't matter since BI_RGB is uncompressed. 
 	bitmap_info.bmiHeader.biSizeImage = 0;
 
-	// Not needed since we don't use pallates.
-	bitmap_info.bmiHeader.biXPelsPerMeter = 0;
-	bitmap_info.bmiHeader.biYPelsPerMeter = 0;
-	bitmap_info.bmiHeader.biClrUsed = 0;
-	bitmap_info.bmiHeader.biClrImportant = 0;
-
-
-	// Windows function that actually creates a DIB for our back buffer that we will write to, then push to our window to have it render whatever we specify
+	// TODO Some Intereesting happened with this stream.(Episode 5)
+	// Originally we were using CreateDIBSection and having it return a Bitmap handle to us
+	// However, Chris Hecker(Smart dude), and ssylvan pointed out we have our memory address to our bitmap. SO WE DON'T NEED A HANDLE TO IT
+	// SEE timestamp 0:30 on episode 5 for the explanation
 	
-	// Takes the following arguments
-	
-	// HDC hdc - A handle to a device context
-	// const BITMAPINFO *pbmi - a pointer to a BITMAPINFO strutcure that specifies various attributes of the DIB, including dimensions and color,
-	// UINT usage - Specifies what type of data that BITMAPINFO struct stores - DIB_RGB_COLORS is almost always used
-	// VOID **ppvBits - A pointer to a variable that receives a pointer to the location of the DIB bit values
-	// HANDLE hSection - A handle to a file-mapping object that the function will use to create the DIB - can be NULL - NOT NEEDED
-	// offset - NOT NEEDED
-	bitmap_handle = CreateDIBSection(bitmap_device_context, 
-					&bitmap_info, DIB_RGB_COLORS, 
-					&bitmap_memory, NULL, 0);
+	int bitmap_memory_size = bitmap_width * bitmap_height * bytes_per_pixel;
+ 	
+	// We use virtual alloc to commit memory for our use in the virtual memory address space for our buffer
+	// Look up virtual paging system for more info if you don't know why we would do this. 
+	bitmap_memory = VirtualAlloc(NULL, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE); 
 }
 
-private_function void win32_update_window(HDC device_context, int x, int y, int width, int height) {
-	
+private_function void win32_update_window(HDC device_context, RECT *client_rect, int x, int y, int width, int height) {
+
+	//Get our current window dimensions from the rect struct so we can properly resize the bitmap
+	int window_width =  client_rect->right - client_rect->left;
+	int window_height = client_rect->bottom - client_rect->top;
+
 	// This function copies color data for a rectancgle of pixels(DIB, JPEG, PNG only) to a specified destination rectangle(Like a window, hence its use here)
 	// Takes the following arguments
 
@@ -105,9 +192,13 @@ private_function void win32_update_window(HDC device_context, int x, int y, int 
 	// const BITMAPINFO *lpbmi - A pointer to a BITMAPINFO structure that contains information about the DIB (Note, this is the src rectangle specified in the long as comment above lol)
 	// UINT iUsage - Specifies how the BITMAPINFO struct stores/looks up color values, DIB_RGB_COLORS is almost always used.
 	// DWORD rop - A code that defines how the color date for the source rectangle is combined with the color data for the destination rectangle to achieve final color.
-	StretchDIBits(bitmap_device_context, 
+	StretchDIBits(device_context,
+			/* 
 			x, y, width, height,
 			x, y, width, height,
+			*/
+			0, 0, bitmap_width, bitmap_height,
+		        0, 0, window_width, window_height,	
 			bitmap_memory, &bitmap_info,
 			DIB_RGB_COLORS, SRCCOPY);
 	
@@ -165,6 +256,11 @@ LRESULT CALLBACK win32_main_window_callback(
 			// Returns a device context that allows the window access to any GUI related functions.
 			HDC device_context = BeginPaint(window, &paint);
 			
+			// TODO duplicate code!
+			RECT client_rect;
+			GetClientRect(window, &client_rect); 
+
+	
 			int x = paint.rcPaint.left;
 			int y = paint.rcPaint.top;
 
@@ -172,7 +268,7 @@ LRESULT CALLBACK win32_main_window_callback(
 			int height = paint.rcPaint.bottom - paint.rcPaint.top;
 
 	
-			win32_update_window(device_context, x, y, width, height);
+			win32_update_window(device_context, &client_rect, x, y, width, height);
 			
 			// EndPaint tells windows you want to stop painting and to clean up any resources still open
 			EndPaint(window, &paint);
@@ -181,7 +277,8 @@ LRESULT CALLBACK win32_main_window_callback(
 		default: { 
 			result = DefWindowProc(window, message, wParam, lParam);
 		}
-	}	
+	}
+	return result;
 };
 
 int CALLBACK WinMain(
@@ -215,7 +312,7 @@ int CALLBACK WinMain(
 		// HMENU hMenu - a handle to a menu we might want to use in the window
 		// HINSTANCE hInstance - handle to an instance we want to associate the window with. In this case, its our program instance from WinMain
 		// LPVOID lpParam - Used to pass parameters into the window if needed.
-		HWND window_handle = CreateWindowExA(
+		HWND window = CreateWindowExA(
 			0,
 			window_class.lpszClassName,
 			"Handmade Hero",
@@ -230,7 +327,7 @@ int CALLBACK WinMain(
 			0);
 		// If creating the window handle fails, it returns NULL(or 0 if you prefer). 
 		// So we can check to see if its created easily
-		if(window_handle) {
+		if(window) {
 					
 			
 			// Windows doesn't actually start sending messages to a windows callback function until you pull it off a queue. So we loop through the messages and use them continously
@@ -238,29 +335,44 @@ int CALLBACK WinMain(
 			// The loop also functions as our main loop in general that keeps the process going, and as a result, the window from disappering immediatly as soon as its created.
 			// Kinda similar to a game loop
 
-			// Where we will store the message			
-			MSG message;
-			
 			running = true;	
+			int blue_offset = 0;
+			int green_offset = 0;
+
 			while(running) {
-				// GetMessage is used to return messages for a window
-				// 	
-				//
-				// LPMSG lpMsg - A pointer to the message struct where we want to store the message we get
-				// HWND hWnd - A handle to the window we want to get messages for. If NULL, gets messages for any window that belows to the current thread
-				// UINT wMsgFilterMin - value to specify message type
-				// UINT wMsgFilterMax - value to specify message type
-				// NOTE: If the filters are both set to zero, it will return all available messages.
-				BOOL message_result = GetMessageA(&message, NULL, 0, 0);
+
+				// Where we will store the message			
+				MSG message;
 				
-				if(message_result > 0) {
-					// Translates the message to get ready for dispatch
+
+				while (PeekMessageA(&message, NULL, 0, 0, PM_REMOVE)) {
+
+					// If windows decides to randomly kill our process, quit
+					if (message.message == WM_QUIT) {
+						running = false;
+					}
+
 					TranslateMessage(&message);
 					DispatchMessageA(&message);
-				}else {
-					break;
 				}
+				// call function to render weird gradient to screen!
 				
+				render_weird_gradient(blue_offset, green_offset);
+
+				HDC device_context = GetDC(window);
+				
+				RECT client_rect;
+				GetClientRect(window,&client_rect);
+
+				int window_width = client_rect.right - client_rect.left;
+				int window_height = client_rect.bottom - client_rect.top;
+
+				win32_update_window(device_context, &client_rect, 0, 0, window_width, window_height);
+				
+				ReleaseDC(window,device_context);
+
+				blue_offset++;
+				green_offset += 2;
 			} 
 		}else{
 		

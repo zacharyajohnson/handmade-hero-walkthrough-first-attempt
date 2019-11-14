@@ -11,6 +11,6 @@ REM Gdi32 had to be linked for the PatBlt method from Day 2
 gcc ..\code\win32_handmade.cpp -lGdi32
 
 REM Optinally run the exe after it is compiled successfully
-REM a.exe
+a.exe
 
 popd
