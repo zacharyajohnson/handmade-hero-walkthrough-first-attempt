@@ -1,5 +1,5 @@
 #include <windows.h>
-#include <stdio.h>
+#include <Xinput.h>
 #include <stdint.h>
 
 
@@ -17,7 +17,7 @@
 // only be seen in the file it is declared if given the static keyword. A private(In Java or C++ term) global variable for that file. 
 
 // NEVER USE A GLOBAL VARIABLE WITHOUT STATIC. God knows how messy code can get if a source file can depend on another files public global variables.
-#define  private_function static 
+#define private_function static 
 #define local_persist static 
 #define global_variable static
 
@@ -58,27 +58,63 @@ struct win32_WindowDimension {
 	int height;
 };
 
+// Define macros for use below
+#define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_STATE *pState)
+#define X_INPUT_SET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_VIBRATION* pVibration)
+
+// Since xinput is not supported in certain machines, we don't want to load the dll file into our program our it will crash(with no warnings) on certain OS versions
+// So we typedef it so we can dynamically get a function point to whatever will work on that system
+// This way at least we will know at compile time something is wrong if it can't find this signature
+typedef X_INPUT_GET_STATE(x_input_get_state);
+typedef X_INPUT_SET_STATE(x_input_set_state);
+
+X_INPUT_GET_STATE(XInputGetStateStub) {
+	return(0);
+}
+
+X_INPUT_SET_STATE(XInputSetStateStub) {
+	return (0);
+}
+
+// Global function pointers to the typedefs above.
+global_variable x_input_get_state *XInputGetState_ = XInputGetStateStub;
+global_variable x_input_set_state *XInputSetState_ = XInputSetStateStub;
+
+
+// Extra safety so someone doesn't accidently call the windows function directly instead of using our function pointer
+#define XInputGetState XInputGetState_
+#define XInputSetState XInputSetState_
+
+
 // global variable that controls if main message/ window loop runs
 // Interestnly enough, in C if you use static for a global variable, it initializes it automatically to zero - just a need tibit I found interesting.
 // set to true when a window handle is successfully created and to false when you either close or destroy the window 
 global_variable bool global_running;
 global_variable Win32_OffscreenBuffer global_back_buffer;
 
+// Load our library on our own. Note: We are using version 1.3 because it is supported on a lot more machines then 1.4.
+private_function void win32_load_x_input(void) {
+	HMODULE x_input_library = LoadLibrary("xinput1_3.dll");
+
+	XInputGetState = (x_input_get_state *)GetProcAddress(x_input_library, "XInputGetState");
+	XInputSetState = (x_input_set_state *)GetProcAddress(x_input_library, "XInputSetState");
+}
+
 // Sets the buffer values based on offsets.
-private_function void render_weird_gradient(Win32_OffscreenBuffer buffer, int blue_offset, int green_offset) {
+private_function void render_weird_gradient(Win32_OffscreenBuffer *buffer, int blue_offset, int green_offset) {
 
 	// Cast our void pointer to an unsigned 8 bit integer pointer
 	// This in effect moves our pointer 8 bits when we do arthmetic.
 	// Which lines up well to when we want to get the next row via the pitch calculation
 	// TODO COME BACK TO THIS DEFINITION
-	uint8 *row = (uint8*)buffer.memory;
+	uint8 *row = (uint8*)buffer->memory;
 
 	// For loop to set individual pixel colors to see if it works
-	for (int y = 0; y < buffer.height; ++y) {
+	for (int y = 0; y < buffer->height; ++y) {
 
 		uint32 *pixel = (uint32*)row;
 
-		for (int x = 0; x < buffer.width; ++x) {
+		for (int x = 0; x < buffer->width; ++x) {
 
 			// LITTLE ENDIAN ARCHITECTURE
 			// lower bytes that make up large data appears first. So 
@@ -100,7 +136,7 @@ private_function void render_weird_gradient(Win32_OffscreenBuffer buffer, int bl
 
 
 		}
-		row += buffer.pitch;
+		row += buffer->pitch;
 	}
 
 }
@@ -203,7 +239,7 @@ private_function void win32_resize_dib_section(Win32_OffscreenBuffer *buffer, in
 	buffer->pitch = buffer->width * bytes_per_pixel;
 }
 
-private_function void win32_display_buffer_in_window(HDC device_context, Win32_OffscreenBuffer buffer, int window_width, int window_height) {
+private_function void win32_display_buffer_in_window(HDC device_context, Win32_OffscreenBuffer *buffer, int window_width, int window_height) {
 
 	// This function copies color data for a rectancgle of pixels(DIB, JPEG, PNG only) to a specified destination rectangle(Like a window, hence its use here)
 	// Takes the following arguments
@@ -227,8 +263,8 @@ private_function void win32_display_buffer_in_window(HDC device_context, Win32_O
 			x, y, width, height,
 			*/
 			0, 0, window_width, window_height,
-		        0, 0, buffer.width, buffer.height,	
-			buffer.memory, &(buffer.info),
+		        0, 0, buffer->width, buffer->height,	
+			buffer->memory, &(buffer->info),
 			DIB_RGB_COLORS, SRCCOPY);
 	
 }
@@ -272,12 +308,71 @@ LRESULT CALLBACK win32_main_window_callback(
 	
 			win32_WindowDimension window_dimension = get_window_dimension(window);
 	
-			win32_display_buffer_in_window(device_context, global_back_buffer, window_dimension.width, window_dimension.height);
+			win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
 			
 			// EndPaint tells windows you want to stop painting and to clean up any resources still open
 			EndPaint(window, &paint);
 			break;
 		}
+		
+		// Keyboard inpu8t
+		case WM_SYSKEYDOWN:
+		case WM_SYSKEYUP:
+		case WM_KEYDOWN:
+		case WM_KEYUP: {
+			uint32 key = wParam;
+
+			bool was_down = ((lParam & (1 << 30)) != 0);
+			bool is_down = ((lParam & (1 << 31)) == 0);
+
+			// THINK ABOUT WHAT THIS MEANS
+			if (was_down != is_down) {
+				// In Windows, you can check any keys that have ansii equivalents but checking for the capital letter of the key
+				// VK codes are used for things that are not in ansii encodings like the up arrow. Hence the vk code flags
+				if (key == 'W') {
+
+				}
+				else if (key == 'A') {
+
+				}
+				else if (key == 'S') {
+
+				}
+				else if (key == 'D') {
+
+				}
+				else if (key == VK_UP) {
+
+				}
+				else if (key == VK_LEFT) {
+
+				}
+				else if (key == VK_DOWN) {
+
+				}
+				else if (key == VK_RIGHT) {
+
+				}
+				else if (key == VK_SPACE) {
+
+				}
+				else if (key == VK_ESCAPE) {
+
+					OutputDebugStringA("ESCAPE ");
+					if (is_down) {
+						OutputDebugStringA("ISDOWN");
+					}
+					if (was_down) {
+						OutputDebugStringA("WASDOWN");
+					}
+
+					OutputDebugStringA("\n");
+				}
+
+			}
+
+		}break;
+
 		default: { 
 			result = DefWindowProc(window, message, wParam, lParam);
 		}
@@ -292,6 +387,8 @@ int CALLBACK WinMain(
   int       showCode 
 ) {
 
+	// Load in our library versions we want to use on our own here
+	win32_load_x_input();
 	// Allocate our size for our global back buffer
 	win32_resize_dib_section(&global_back_buffer, 1280, 720);
 
@@ -368,18 +465,65 @@ int CALLBACK WinMain(
 				}
 				// call function to render weird gradient to screen!
 				
-				render_weird_gradient(global_back_buffer, blue_offset, green_offset);
+				//TODO Should we pull this more frequently?
+				// Get the status of our controller inputs via XInput.
+				// Currently Windows supports up to four xbox controllers but this could change in the future
+				for (DWORD controller_index = 0; controller_index < XUSER_MAX_COUNT; controller_index++)
+				{
+					XINPUT_STATE controller_state;
+					ZeroMemory(&controller_state, sizeof(XINPUT_STATE));
+
+					// If the get the state is successful(IE, the controller is plugged in or exists)
+					if (XInputGetState(controller_index, &controller_state) == ERROR_SUCCESS)
+					{	
+						// Controller is plugged in 
+						
+						// Our gamepad
+						XINPUT_GAMEPAD *gamepad = &(controller_state.Gamepad);
+
+						// Get which buttons were pressed on the controller
+						bool dpad_up = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
+						bool dpad_down = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
+						bool dpad_left = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
+						bool gamepad_start = gamepad->wButtons & XINPUT_GAMEPAD_START;
+						bool gamepad_end = gamepad->wButtons & XINPUT_GAMEPAD_BACK;
+						bool gamepad_left_shoulder = gamepad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER;
+						bool gamepad_right_shoulder = gamepad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER;
+						bool gamepad_a = gamepad->wButtons & XINPUT_GAMEPAD_A;
+						bool gamepad_b = gamepad->wButtons & XINPUT_GAMEPAD_B;
+						bool gamepad_x = gamepad->wButtons & XINPUT_GAMEPAD_X;
+						bool gamepad_y = gamepad->wButtons & XINPUT_GAMEPAD_Y;
+
+						// Get which way the left stick was tiltted to
+						int16 left_stick_x_position = gamepad->sThumbLX;
+						int16 left_stick_y_position = gamepad->sThumbLY;
+
+						if (gamepad_a) {
+							green_offset += 2;
+						}
+					}
+					else
+					{
+						// Controller is not connected 
+					}
+				}
+
+				//XINPUT_VIBRATION x_input_vibration;
+				//x_input_vibration.wLeftMotorSpeed = 60000;
+				//x_input_vibration.wRightMotorSpeed = 60000;
+				//XInputSetState(0, &x_input_vibration);
+
+				render_weird_gradient(&global_back_buffer, blue_offset, green_offset);
 
 				HDC device_context = GetDC(window);
 			
 				win32_WindowDimension window_dimension = get_window_dimension(window);	
 			
-			 	win32_display_buffer_in_window(device_context, global_back_buffer, window_dimension.width, window_dimension.height);
+			 	win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
 				
 				ReleaseDC(window,device_context);
 
 				blue_offset++;
-				green_offset++;
 			} 
 		}else{
 		
