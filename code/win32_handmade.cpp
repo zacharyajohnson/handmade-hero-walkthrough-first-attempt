@@ -37,40 +37,48 @@ typedef int64_t int64;
 // DIB - Stands for device independent bitmap. 
 // In windows terminology anway.
 
+// Struct that contains our memory / info about a graphics buffer that we can use to
+// write data to and display on the window 
+// Pixels are always 32 bits wide
+struct Win32_OffscreenBuffer {
+	// Struct that contains the info used to create our bitmap
+	BITMAPINFO info;
+  
+	// The actual pointer to memory where our DIB will be written to.	
+	void *memory;
+	
+	// See below comments on pitch
+	int pitch;
+	int height;
+	int width;
+};
+
+struct win32_WindowDimension {
+	int width;
+	int height;
+};
+
 // global variable that controls if main message/ window loop runs
 // Interestnly enough, in C if you use static for a global variable, it initializes it automatically to zero - just a need tibit I found interesting.
 // set to true when a window handle is successfully created and to false when you either close or destroy the window 
-global_variable bool running;
+global_variable bool global_running;
+global_variable Win32_OffscreenBuffer global_back_buffer;
 
-// Struct that contains the info used to create our bitmap
-global_variable BITMAPINFO bitmap_info;
-  
-// The actual pointer to memory where our DIB will be written to.	
-global_variable	void *bitmap_memory;
+// Sets the buffer values based on offsets.
+private_function void render_weird_gradient(Win32_OffscreenBuffer buffer, int blue_offset, int green_offset) {
 
-global_variable int bitmap_height;
-global_variable int bitmap_width;
-global_variable int bytes_per_pixel = 4;
-
-// Function that finally renders stuff to the screen. WE DID IT.
-private_function void render_weird_gradient(int blue_offset, int green_offset) {
-
-	int width = bitmap_width;
-	int height = bitmap_height;
-
-	int pitch = bitmap_width * bytes_per_pixel;
 	// Cast our void pointer to an unsigned 8 bit integer pointer
 	// This in effect moves our pointer 8 bits when we do arthmetic.
 	// Which lines up well to when we want to get the next row via the pitch calculation
 	// TODO COME BACK TO THIS DEFINITION
-	uint8 *row = (uint8*)bitmap_memory;
+	uint8 *row = (uint8*)buffer.memory;
 
 	// For loop to set individual pixel colors to see if it works
-	for (int y = 0; y < bitmap_height; ++y) {
+	for (int y = 0; y < buffer.height; ++y) {
 
 		uint32 *pixel = (uint32*)row;
 
-		for (int x = 0; x < bitmap_width; ++x) {
+		for (int x = 0; x < buffer.width; ++x) {
 
 			// LITTLE ENDIAN ARCHITECTURE
 			// lower bytes that make up large data appears first. So 
@@ -92,29 +100,51 @@ private_function void render_weird_gradient(int blue_offset, int green_offset) {
 
 
 		}
-		row += pitch;
+		row += buffer.pitch;
 	}
 
 }
 
-private_function void win32_resize_dib_section(int width, int height) {
+private_function win32_WindowDimension get_window_dimension(HWND window) {
+	RECT client_rect;
+			
+	// First, we call GetClientRect to get the size of our client window
+	// The client window is defined as the part of the screen that applications appear in. Not the part where there is the border, x out button, etc.
+	// Since this is what we are drawing to we want this.
+	GetClientRect(window, &client_rect); 
+	
+	win32_WindowDimension window_dimension;
+	// Get the height and width of our rectangle
+
+	// width - right(x-coordiante of lower-right corner) - left(x coordinate of upper-left corner)
+	// height = bottom(y-cooridante of lower-right corner) - top(y coordinate of upper-left corner)
+	window_dimension.width = client_rect.right - client_rect.left;
+	window_dimension.height = client_rect.bottom - client_rect.top;
+
+	return window_dimension;
+}
+
+
+private_function void win32_resize_dib_section(Win32_OffscreenBuffer *buffer, int width, int height) {
 
 	// If our bitmap_memory has been allocated, we free our memory first so we don't have leaks.
 
-	if(bitmap_memory != NULL) {
+	if(buffer->memory != NULL) {
 		// Opposite of VirtualRelease
-		VirtualFree(bitmap_memory, 0, MEM_RELEASE);
+		VirtualFree(buffer->memory, 0, MEM_RELEASE);
 	}
 	
 	// Save the bitmap width/height values to a global variable for further updates in win32_update_window function
 	// Since, when we call that function, we are resizing our bitmap, we need its dimensions so we can properly
 	// translate from the source(the window and its dimensions) and the destination(bitmap)
-	bitmap_width = width;
-	bitmap_height = height;
+	buffer->width = width;
+	buffer->height = height;
+	
+	int bytes_per_pixel = 4;
 
 	// Set values for the BITMAPINFOHEADER struct - which contains info about the dimensions and color format of a DIB.
-	bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
-	bitmap_info.bmiHeader.biWidth = bitmap_width;
+	buffer->info.bmiHeader.biSize = sizeof(buffer->info.bmiHeader);
+	buffer->info.bmiHeader.biWidth = buffer->width;
 
 	// THIS IS MADNESS
 	// So, this may seem insane at glance but there is a reason for it.
@@ -141,8 +171,8 @@ private_function void win32_resize_dib_section(int width, int height) {
  
 	// CASEY prefers top-down and so do I since that is how I was taught to think of it so besides that and the paragraph I wrote above on why this is important, we are going with negative.
 	// JUST understand the implications of this.
-	bitmap_info.bmiHeader.biHeight= -bitmap_height;
-	bitmap_info.bmiHeader.biPlanes = 1;
+	buffer->info.bmiHeader.biHeight= -buffer->height;
+	buffer->info.bmiHeader.biPlanes = 1;
 	
 	// Sets the number of bits per pixel we get. Usually for RGB you need 24 but Casey says we need 32 for later so that will be fun TODO
 	// EPISODE 5 - Casey brought up unaligned byte accessing / alignment, basically when accessing increments of bytes that doesn't align up naturally with what the processor typically likes to handle,
@@ -151,30 +181,29 @@ private_function void win32_resize_dib_section(int width, int height) {
 	// https://www.kernel.org/doc/Documentation/unaligned-memory-access.txt
 	// UPDATE - biBitCount is a DWORD(32) bits. SO we make it 32 bits so its natural to get the next value of the pixel instead of having to jump through shit if we had
 	// something like 24 bits. The processer would have to jump extra bits to get to the next value in memory
-	bitmap_info.bmiHeader.biBitCount = 32;
+	buffer->info.bmiHeader.biBitCount = 32;
 
 	// uncompressed bitmap format.
-	bitmap_info.bmiHeader.biCompression = BI_RGB;
+	buffer->info.bmiHeader.biCompression = BI_RGB;
 	// Used to specify the size of the image so compressed formats know what they are uncompressing to. For us it doesn't matter since BI_RGB is uncompressed. 
-	bitmap_info.bmiHeader.biSizeImage = 0;
+	buffer->info.bmiHeader.biSizeImage = 0;
 
 	// TODO Some Intereesting happened with this stream.(Episode 5)
 	// Originally we were using CreateDIBSection and having it return a Bitmap handle to us
 	// However, Chris Hecker(Smart dude), and ssylvan pointed out we have our memory address to our bitmap. SO WE DON'T NEED A HANDLE TO IT
 	// SEE timestamp 0:30 on episode 5 for the explanation
 	
-	int bitmap_memory_size = bitmap_width * bitmap_height * bytes_per_pixel;
+	int bitmap_memory_size = buffer->width * buffer->height * bytes_per_pixel;
  	
 	// We use virtual alloc to commit memory for our use in the virtual memory address space for our buffer
 	// Look up virtual paging system for more info if you don't know why we would do this. 
-	bitmap_memory = VirtualAlloc(NULL, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE); 
+	buffer->memory = VirtualAlloc(NULL, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE); 
+
+	
+	buffer->pitch = buffer->width * bytes_per_pixel;
 }
 
-private_function void win32_update_window(HDC device_context, RECT *client_rect, int x, int y, int width, int height) {
-
-	//Get our current window dimensions from the rect struct so we can properly resize the bitmap
-	int window_width =  client_rect->right - client_rect->left;
-	int window_height = client_rect->bottom - client_rect->top;
+private_function void win32_display_buffer_in_window(HDC device_context, Win32_OffscreenBuffer buffer, int window_width, int window_height) {
 
 	// This function copies color data for a rectancgle of pixels(DIB, JPEG, PNG only) to a specified destination rectangle(Like a window, hence its use here)
 	// Takes the following arguments
@@ -197,9 +226,9 @@ private_function void win32_update_window(HDC device_context, RECT *client_rect,
 			x, y, width, height,
 			x, y, width, height,
 			*/
-			0, 0, bitmap_width, bitmap_height,
-		        0, 0, window_width, window_height,	
-			bitmap_memory, &bitmap_info,
+			0, 0, window_width, window_height,
+		        0, 0, buffer.width, buffer.height,	
+			buffer.memory, &(buffer.info),
 			DIB_RGB_COLORS, SRCCOPY);
 	
 }
@@ -215,33 +244,17 @@ LRESULT CALLBACK win32_main_window_callback(
 
 	switch(message) {
 		case WM_SIZE: {
-		
-			RECT client_rect;
-			
-			// First, we call GetClientRect to get the size of our client window
-			// The client window is defined as the part of the screen that applications appear in. Not the part where there is the border, x out button, etc.
-			// Since this is what we are drawing to we want this.
-			GetClientRect(window, &client_rect); 
 
-			// Get the height and width of our rectangle
-
-			// width - right(x-coordiante of lower-right corner) - left(x coordinate of upper-left corner)
-			// height = bottom(y-cooridante of lower-right corner) - top(y coordinate of upper-left corner)
-			int width = client_rect.right - client_rect.left;
-			int height = client_rect.bottom - client_rect.top;
-
-			// We resize the bitmap to represent correctly our resized window dimensions
-			win32_resize_dib_section(width, height);
 		} break;
 		
 		case WM_DESTROY: {
 			// TODO Handle this with a message to the user?
-			running = false;
+			global_running = false;
 		} break;
 		
 		case WM_CLOSE: {
 			// TODO Handle this as an error - recreate window?
-			running = false;
+			global_running = false;
 		} break;
 		case WM_ACTIVATEAPP: {	
 		
@@ -256,19 +269,10 @@ LRESULT CALLBACK win32_main_window_callback(
 			// Returns a device context that allows the window access to any GUI related functions.
 			HDC device_context = BeginPaint(window, &paint);
 			
-			// TODO duplicate code!
-			RECT client_rect;
-			GetClientRect(window, &client_rect); 
-
 	
-			int x = paint.rcPaint.left;
-			int y = paint.rcPaint.top;
-
-			int width = paint.rcPaint.right - paint.rcPaint.left;
-			int height = paint.rcPaint.bottom - paint.rcPaint.top;
-
+			win32_WindowDimension window_dimension = get_window_dimension(window);
 	
-			win32_update_window(device_context, &client_rect, x, y, width, height);
+			win32_display_buffer_in_window(device_context, global_back_buffer, window_dimension.width, window_dimension.height);
 			
 			// EndPaint tells windows you want to stop painting and to clean up any resources still open
 			EndPaint(window, &paint);
@@ -287,8 +291,15 @@ int CALLBACK WinMain(
   LPSTR     commandLine,
   int       showCode 
 ) {
+
+	// Allocate our size for our global back buffer
+	win32_resize_dib_section(&global_back_buffer, 1280, 720);
+
 	WNDCLASS window_class = {};
 
+	// Flags that tell windows to paint the whole screen when any kind of change happens
+	// instead of just painting new sections of the screen as they are drawn.
+	window_class.style = CS_HREDRAW | CS_VREDRAW;
 	window_class.lpfnWndProc = win32_main_window_callback;
 	window_class.hInstance = instance;
 	//window_class.hIcon;
@@ -325,21 +336,21 @@ int CALLBACK WinMain(
 			0,
 			instance,
 			0);
+
 		// If creating the window handle fails, it returns NULL(or 0 if you prefer). 
 		// So we can check to see if its created easily
 		if(window) {
-					
 			
 			// Windows doesn't actually start sending messages to a windows callback function until you pull it off a queue. So we loop through the messages and use them continously
 
 			// The loop also functions as our main loop in general that keeps the process going, and as a result, the window from disappering immediatly as soon as its created.
 			// Kinda similar to a game loop
 
-			running = true;	
+			global_running = true;	
 			int blue_offset = 0;
 			int green_offset = 0;
 
-			while(running) {
+			while(global_running) {
 
 				// Where we will store the message			
 				MSG message;
@@ -349,7 +360,7 @@ int CALLBACK WinMain(
 
 					// If windows decides to randomly kill our process, quit
 					if (message.message == WM_QUIT) {
-						running = false;
+						global_running = false;
 					}
 
 					TranslateMessage(&message);
@@ -357,22 +368,18 @@ int CALLBACK WinMain(
 				}
 				// call function to render weird gradient to screen!
 				
-				render_weird_gradient(blue_offset, green_offset);
+				render_weird_gradient(global_back_buffer, blue_offset, green_offset);
 
 				HDC device_context = GetDC(window);
-				
-				RECT client_rect;
-				GetClientRect(window,&client_rect);
-
-				int window_width = client_rect.right - client_rect.left;
-				int window_height = client_rect.bottom - client_rect.top;
-
-				win32_update_window(device_context, &client_rect, 0, 0, window_width, window_height);
+			
+				win32_WindowDimension window_dimension = get_window_dimension(window);	
+			
+			 	win32_display_buffer_in_window(device_context, global_back_buffer, window_dimension.width, window_dimension.height);
 				
 				ReleaseDC(window,device_context);
 
 				blue_offset++;
-				green_offset += 2;
+				green_offset++;
 			} 
 		}else{
 		
