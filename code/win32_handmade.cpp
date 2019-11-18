@@ -93,12 +93,14 @@ global_variable bool global_running;
 global_variable Win32_OffscreenBuffer global_back_buffer;
 
 // Load our library on our own. Note: We are using version 1.3 because it is supported on a lot more machines then 1.4.
+// If we can't find it, it returns null and we know the machine does not have the proper dlls installed.
 private_function void win32_load_x_input(void) {
 	HMODULE x_input_library = LoadLibrary("xinput1_3.dll");
 
 	XInputGetState = (x_input_get_state *)GetProcAddress(x_input_library, "XInputGetState");
 	XInputSetState = (x_input_set_state *)GetProcAddress(x_input_library, "XInputSetState");
 }
+
 
 // Sets the buffer values based on offsets.
 private_function void render_weird_gradient(Win32_OffscreenBuffer *buffer, int blue_offset, int green_offset) {
@@ -498,9 +500,9 @@ int CALLBACK WinMain(
 						int16 left_stick_x_position = gamepad->sThumbLX;
 						int16 left_stick_y_position = gamepad->sThumbLY;
 
-						if (gamepad_a) {
-							green_offset += 2;
-						}
+						blue_offset += left_stick_x_position >> 12;
+						green_offset += left_stick_y_position >> 12;
+
 					}
 					else
 					{
@@ -522,8 +524,6 @@ int CALLBACK WinMain(
 			 	win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
 				
 				ReleaseDC(window,device_context);
-
-				blue_offset++;
 			} 
 		}else{
 		
