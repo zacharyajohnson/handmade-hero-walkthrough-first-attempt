@@ -1,5 +1,6 @@
 #include <windows.h>
-#include <Xinput.h>
+#include <xinput.h>
+#include <dsound.h>
 #include <stdint.h>
 
 
@@ -31,6 +32,7 @@ typedef int8_t int8;
 typedef int16_t int16;
 typedef int32_t int32;
 typedef int64_t int64;
+typedef int32 bool32;
 
 
 
@@ -59,26 +61,32 @@ struct win32_WindowDimension {
 };
 
 // Define macros for use below
-#define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_STATE *pState)
-#define X_INPUT_SET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_VIBRATION* pVibration)
 
 // Since xinput is not supported in certain machines, we don't want to load the dll file into our program our it will crash(with no warnings) on certain OS versions
 // So we typedef it so we can dynamically get a function point to whatever will work on that system
 // This way at least we will know at compile time something is wrong if it can't find this signature
+#define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_STATE *pState)
 typedef X_INPUT_GET_STATE(x_input_get_state);
-typedef X_INPUT_SET_STATE(x_input_set_state);
 
 X_INPUT_GET_STATE(XInputGetStateStub) {
-	return(0);
-}
-
-X_INPUT_SET_STATE(XInputSetStateStub) {
-	return (0);
+	return(ERROR_DEVICE_NOT_CONNECTED);
 }
 
 // Global function pointers to the typedefs above.
-global_variable x_input_get_state *XInputGetState_ = XInputGetStateStub;
-global_variable x_input_set_state *XInputSetState_ = XInputSetStateStub;
+global_variable x_input_get_state* XInputGetState_ = XInputGetStateStub;
+
+#define X_INPUT_SET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_VIBRATION* pVibration)
+typedef X_INPUT_SET_STATE(x_input_set_state);
+
+X_INPUT_SET_STATE(XInputSetStateStub) {
+	return (ERROR_DEVICE_NOT_CONNECTED);
+}
+
+global_variable x_input_set_state* XInputSetState_ = XInputSetStateStub;
+
+
+#define DIRECT_SOUND_CREATE(name) HRESULT WINAPI name(LPCGUID pcGuidDevice, LPDIRECTSOUND *ppDS, LPUNKNOWN pUnkOuter ); 
+typedef DIRECT_SOUND_CREATE(direct_sound_create);
 
 
 // Extra safety so someone doesn't accidently call the windows function directly instead of using our function pointer
@@ -95,10 +103,20 @@ global_variable Win32_OffscreenBuffer global_back_buffer;
 // Load our library on our own. Note: We are using version 1.3 because it is supported on a lot more machines then 1.4.
 // If we can't find it, it returns null and we know the machine does not have the proper dlls installed.
 private_function void win32_load_x_input(void) {
-	HMODULE x_input_library = LoadLibrary("xinput1_3.dll");
+	
+	HMODULE x_input_library = LoadLibraryA("xinput1_4.dll");
 
-	XInputGetState = (x_input_get_state *)GetProcAddress(x_input_library, "XInputGetState");
-	XInputSetState = (x_input_set_state *)GetProcAddress(x_input_library, "XInputSetState");
+	// NOTE. Windows 8+ Have xinput 1.4. If we cant find it, default to xinput 1.3, which older machines have.
+	if (x_input_library == 0) {
+		//TODO Test this on windows 8
+		x_input_library = LoadLibraryA("xinput1_3.dll");
+	}
+	
+	if (x_input_library != 0) {
+		XInputGetState = (x_input_get_state*)GetProcAddress(x_input_library, "XInputGetState");
+		XInputSetState = (x_input_set_state*)GetProcAddress(x_input_library, "XInputSetState");
+	}
+
 }
 
 
@@ -140,6 +158,86 @@ private_function void render_weird_gradient(Win32_OffscreenBuffer *buffer, int b
 		}
 		row += buffer->pitch;
 	}
+
+}
+
+private_function void win32_init_d_sound(HWND window, int32 samples_per_second, int32 buffer_size) {
+	// TODO Load the direct sound library itself(dll file)
+	HMODULE d_sound_library = LoadLibraryA("dsound.dll");
+
+	if (d_sound_library != 0) {
+		direct_sound_create  *DirectSoundCreate = (direct_sound_create *) GetProcAddress(d_sound_library, "DirectSoundCreate");
+
+		// TODO Double check to see if this works on XP - DirectSound 7 or 8?
+		LPDIRECTSOUND direct_sound;
+
+		// If method fetch is correct and we get a pointer to our sound handle
+		if (DirectSoundCreate != 0 && SUCCEEDED(DirectSoundCreate(0, &direct_sound, 0))) {
+			
+			// Format struct for our buffers
+			WAVEFORMATEX wave_format = {};
+			wave_format.wFormatTag = WAVE_FORMAT_PCM;
+			// Stereo
+			wave_format.nChannels = 2;
+			wave_format.nSamplesPerSec = samples_per_second;
+			wave_format.wBitsPerSample = 16;
+			wave_format.nBlockAlign = (wave_format.nChannels * wave_format.wBitsPerSample) / 8;
+			wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * wave_format.nBlockAlign;
+			wave_format.cbSize = 0;
+
+			// If we can set the priority level(Basically how resources are handled)
+			if (SUCCEEDED(direct_sound->SetCooperativeLevel(window, DSSCL_PRIORITY))) {
+				
+				// Sets up sound buffer and description struct for the primary buffer
+				DSBUFFERDESC buffer_description = {};
+				buffer_description.dwSize = sizeof(buffer_description);
+				buffer_description.dwFlags = DSBCAPS_PRIMARYBUFFER;
+		
+				// TODO DSBCAPS_GLOBALFOCUS?
+				// "Create" a primary sound buffer - this is due to legacy reasons. Prevents upsampling and down sampling by forcing it to be in a specific format
+				// Gets a "handle" to the sound card itself and set the format of the sound card to ensure it plays in what format we want it to be.
+				// DO NOT THINK OF THIS AS AN ACTUAL BUFFER
+				LPDIRECTSOUNDBUFFER primary_sound_buffer;
+
+				// If creating the sound buffer itself is successful
+				if (SUCCEEDED(direct_sound->CreateSoundBuffer(&buffer_description, &primary_sound_buffer, 0))) {
+					
+					// IF Formatting the priamry buffer succeeded
+					if (SUCCEEDED(primary_sound_buffer->SetFormat(&wave_format))) {
+						OutputDebugStringA("Primary buffer format was set");
+					}else {
+						// TODO DIAGNOTIC
+					}
+
+
+				}
+
+			} else {
+				
+			}
+
+			// Sets up sound buffer and description struct for our secondary buffer
+			DSBUFFERDESC buffer_description = {};
+			buffer_description.dwSize = sizeof(buffer_description);
+			buffer_description.dwFlags = 0;
+			buffer_description.dwBufferBytes = buffer_size;
+			buffer_description.lpwfxFormat = &wave_format;
+
+			// The actual buffer we will play into
+			LPDIRECTSOUNDBUFFER secondary_sound_buffer;
+
+			// If creating the sound buffer itself is successful
+			if (SUCCEEDED(direct_sound->CreateSoundBuffer(&buffer_description, &secondary_sound_buffer, 0))) {
+				OutputDebugStringA("Secondary sound buffer created successfully");
+			}
+
+		} else {
+			//TODO  Diagnostic
+		}
+	} else {
+		//TODO Diagnostic
+	}
+	
 
 }
 
@@ -235,7 +333,8 @@ private_function void win32_resize_dib_section(Win32_OffscreenBuffer *buffer, in
  	
 	// We use virtual alloc to commit memory for our use in the virtual memory address space for our buffer
 	// Look up virtual paging system for more info if you don't know why we would do this. 
-	buffer->memory = VirtualAlloc(NULL, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE); 
+	// NOTE. We do MEM_RESERVE AND MEM_COMMIT(Which does both), we explicilty tell it to reserve our memory
+	buffer->memory = VirtualAlloc(NULL, bitmap_memory_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); 
 
 	
 	buffer->pitch = buffer->width * bytes_per_pixel;
@@ -370,10 +469,18 @@ LRESULT CALLBACK win32_main_window_callback(
 
 					OutputDebugStringA("\n");
 				}
+			
+				
+			} 
+			
+			// If you ALT F4, close the window
+			bool32 alt_key_was_down = (lParam & (1 << 29));
 
+			if (key == VK_F4 && alt_key_was_down) {
+				global_running = false;
 			}
 
-		}break;
+		} break;
 
 		default: { 
 			result = DefWindowProc(window, message, wParam, lParam);
@@ -391,6 +498,7 @@ int CALLBACK WinMain(
 
 	// Load in our library versions we want to use on our own here
 	win32_load_x_input();
+
 	// Allocate our size for our global back buffer
 	win32_resize_dib_section(&global_back_buffer, 1280, 720);
 
@@ -448,6 +556,10 @@ int CALLBACK WinMain(
 			global_running = true;	
 			int blue_offset = 0;
 			int green_offset = 0;
+
+			// Initalize direct sound library
+			// NOTE: This direct sound is fairly old and we are using it to be compatible with older machines like XP
+			win32_init_d_sound(window, 48000, 48000 * sizeof(int16) * 2);
 
 			while(global_running) {
 
