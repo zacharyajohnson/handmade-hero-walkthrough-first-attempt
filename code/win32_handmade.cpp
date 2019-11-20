@@ -36,6 +36,8 @@ typedef int32 bool32;
 
 
 
+
+
 // DIB - Stands for device independent bitmap. 
 // In windows terminology anway.
 
@@ -59,6 +61,17 @@ struct win32_WindowDimension {
 	int width;
 	int height;
 };
+
+// global variable that controls if main message/ window loop runs
+// Interestnly enough, in C if you use static for a global variable, it initializes it automatically to zero - just a need tibit I found interesting.
+// set to true when a window handle is successfully created and to false when you either close or destroy the window 
+global_variable bool global_running;
+
+// Our graphics buffer for our window
+global_variable Win32_OffscreenBuffer global_back_buffer;
+
+// Our sound buffer for playing sounds
+global_variable LPDIRECTSOUNDBUFFER global_secondary_sound_buffer;
 
 // Define macros for use below
 
@@ -92,13 +105,6 @@ typedef DIRECT_SOUND_CREATE(direct_sound_create);
 // Extra safety so someone doesn't accidently call the windows function directly instead of using our function pointer
 #define XInputGetState XInputGetState_
 #define XInputSetState XInputSetState_
-
-
-// global variable that controls if main message/ window loop runs
-// Interestnly enough, in C if you use static for a global variable, it initializes it automatically to zero - just a need tibit I found interesting.
-// set to true when a window handle is successfully created and to false when you either close or destroy the window 
-global_variable bool global_running;
-global_variable Win32_OffscreenBuffer global_back_buffer;
 
 // Load our library on our own. Note: We are using version 1.3 because it is supported on a lot more machines then 1.4.
 // If we can't find it, it returns null and we know the machine does not have the proper dlls installed.
@@ -223,11 +229,9 @@ private_function void win32_init_d_sound(HWND window, int32 samples_per_second, 
 			buffer_description.dwBufferBytes = buffer_size;
 			buffer_description.lpwfxFormat = &wave_format;
 
-			// The actual buffer we will play into
-			LPDIRECTSOUNDBUFFER secondary_sound_buffer;
-
+			
 			// If creating the sound buffer itself is successful
-			if (SUCCEEDED(direct_sound->CreateSoundBuffer(&buffer_description, &secondary_sound_buffer, 0))) {
+			if (SUCCEEDED(direct_sound->CreateSoundBuffer(&buffer_description, &global_secondary_sound_buffer, 0))) {
 				OutputDebugStringA("Secondary sound buffer created successfully");
 			}
 
@@ -556,10 +560,28 @@ int CALLBACK WinMain(
 			global_running = true;	
 			int blue_offset = 0;
 			int green_offset = 0;
+	
+			// Represents our hertz value. cycles/per second. Defines what kind of sound plays
+			// The classic 1kHz example(1000 hz) found on the square wave wiki page
+			int tone_hz = 256;
+			int16 tone_volume = 3000;
+			// Counter that keeps track of where we are in our sound buffer to make a square wave.
+			uint32 running_sample_index = 0;
+			int samples_per_second = 48000;
+
+			int bytes_per_sample = sizeof(int16) * 2;
+
+			// If we want our values in a second to sound like a certain hertz value,
+			// We need to split it up into chunks. So we take our samples per second / hz
+			int square_wave_period = samples_per_second / tone_hz;
+			int half_square_wave_period = square_wave_period / 2;
+			int secondary_sound_buffer_size = samples_per_second * bytes_per_sample;
 
 			// Initalize direct sound library
 			// NOTE: This direct sound is fairly old and we are using it to be compatible with older machines like XP
-			win32_init_d_sound(window, 48000, 48000 * sizeof(int16) * 2);
+			win32_init_d_sound(window, samples_per_second, samples_per_second * sizeof(int16) * 2);
+
+			bool sound_is_playing = false;
 
 			while(global_running) {
 
@@ -628,6 +650,98 @@ int CALLBACK WinMain(
 				//XInputSetState(0, &x_input_vibration);
 
 				render_weird_gradient(&global_back_buffer, blue_offset, green_offset);
+
+				// NOTE: DirectSound output test
+
+				// Point in our buffer where whatever hardware is playing our sound is currently looking at.
+				// Since we can be stalled by the OS, we can't write directly into the play_curser location or it will play garbadgeS
+				DWORD play_cursor;
+
+				// Cursor that tells us where we can start playing
+				DWORD write_cursor;
+				// If we can get the current position in our sound buffer
+				if (SUCCEEDED(global_secondary_sound_buffer->GetCurrentPosition(&play_cursor, &write_cursor))) {
+					// Where we will write in our sound buffer.
+					DWORD bytes_to_lock = running_sample_index * bytes_per_sample % secondary_sound_buffer_size;
+
+				
+
+					// The amount of bytes to write to the sound buffer
+					DWORD bytes_to_write;
+
+			
+					// THIS SHOULD NEVER HAPPEN SINCE WE WANT TO ALWAYS WRITE AHEAD OF THE PLAY CURSOR
+					if (bytes_to_lock == play_cursor) {
+						bytes_to_write = secondary_sound_buffer_size;
+					}
+
+					// If where we want to lock our buffer is in front of our play cursor, write to end of buffer
+					// Then loop around and start at the beginning and write to the play cursor( Non inclusive)
+					// Else, we are before the play cursor and we only have one buffer chunk to work with, from our pointer to the play cursor
+					else if (bytes_to_lock > play_cursor) {
+						bytes_to_write = secondary_sound_buffer_size - bytes_to_lock;
+						bytes_to_write += play_cursor;
+					}else {
+						bytes_to_write = play_cursor - bytes_to_lock;
+					}
+
+					// Readies our buffer for data writing and returns pointers to the beginning of where we can write and the size of our region size
+					// NOTE: If you try and reserve n bytes at a location of the buffer and it is bigger then what the 
+					// rest of the buffer can hold at that point, it will go to the beginning of the buffer and allocate the rest there. This is why there are two region structs
+					// we need to handle.
+					// We need to handle both cases.
+					VOID* region_1;
+					DWORD region_1_size;
+
+					VOID* region_2;
+					DWORD region_2_size;
+
+					
+
+					// If we can lock the sound buffer for writing to it.
+					if (SUCCEEDED(global_secondary_sound_buffer->Lock(
+						bytes_to_lock, bytes_to_write,
+						&region_1, &region_1_size,
+						&region_2, &region_2_size,
+						0
+					))) {
+
+						//TODO assert that region1size/region2size is valid 
+						int16* sample_out_region_1 = (int16*)region_1;
+						int16* sample_out_region_2 = (int16*)region_2;
+
+						// Our sizes are byte values. We want the actual number of samples in our buffer to loop through them
+						// So we take size(bytes) / bytes per sample(In this case 32)
+						DWORD region_1_sample_count = region_1_size / bytes_per_sample;
+						DWORD region_2_sample_count = region_2_size / bytes_per_sample;
+
+						for (DWORD sample_index = 0; sample_index < region_1_sample_count; ++sample_index) {
+						
+							int16 sample_value = ((running_sample_index++ / half_square_wave_period ) % 2) ? tone_volume : -tone_volume;
+							*sample_out_region_1++ = sample_value;
+							*sample_out_region_1++ = sample_value;
+
+						}
+
+						for (DWORD sample_index = 0; sample_index < region_2_sample_count; ++sample_index) {
+						
+							int16 sample_value = ((running_sample_index++ / half_square_wave_period) % 2) ? tone_volume : -tone_volume;
+							*sample_out_region_2++ = sample_value;
+							*sample_out_region_2++ = sample_value;
+						}
+
+						// Unlock the buffer to prevent sound glitches / issues
+						global_secondary_sound_buffer->Unlock(region_1, region_1_size, region_2, region_2_size);
+
+
+					}
+				}
+
+				if (!sound_is_playing) {
+					global_secondary_sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
+
+					sound_is_playing = true;
+				}
 
 				HDC device_context = GetDC(window);
 			
