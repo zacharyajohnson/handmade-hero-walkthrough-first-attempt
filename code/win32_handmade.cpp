@@ -2,6 +2,7 @@
 #include <xinput.h>
 #include <dsound.h>
 #include <stdint.h>
+#include <math.h>
 
 
 // Casey does something intresting and uses #define to define static to the three different things static can mean to make it clearer to himself.
@@ -21,6 +22,7 @@
 #define private_function static 
 #define local_persist static 
 #define global_variable static
+#define pi32 3.14159265359f
 
 // Getting rid of this god awful hungarian notation
 typedef uint8_t uint8;
@@ -34,6 +36,8 @@ typedef int32_t int32;
 typedef int64_t int64;
 typedef int32 bool32;
 
+typedef float real32;
+typedef double real64;
 
 
 
@@ -62,10 +66,35 @@ struct win32_WindowDimension {
 	int height;
 };
 
+struct win32_SoundOutput {
+	
+	int samples_per_second;
+	// Represents our hertz value. cycles/per second. Defines what kind of sound plays
+	int tone_hz;
+	int16 tone_volume;
+	// Counter that keeps track of where we are in our sound buffer to make a square wave.
+	uint32 running_sample_index;
+	
+	// If we want our values in a second to sound like a certain hertz value,
+	// We need to split it up into chunks. So we take our samples per second / hz
+	int wave_period;
+
+	int bytes_per_sample;
+
+	int secondary_sound_buffer_size;
+
+	real32 t_sine;
+
+	int latency_sound_count;
+};
+
+
+
+
 // global variable that controls if main message/ window loop runs
 // Interestnly enough, in C if you use static for a global variable, it initializes it automatically to zero - just a need tibit I found interesting.
 // set to true when a window handle is successfully created and to false when you either close or destroy the window 
-global_variable bool global_running;
+global_variable bool32 global_running;
 
 // Our graphics buffer for our window
 global_variable Win32_OffscreenBuffer global_back_buffer;
@@ -112,6 +141,10 @@ private_function void win32_load_x_input(void) {
 	
 	HMODULE x_input_library = LoadLibraryA("xinput1_4.dll");
 
+	if (x_input_library == 0) {
+		x_input_library = LoadLibraryA("xinput9_1_0.dll");
+	}
+
 	// NOTE. Windows 8+ Have xinput 1.4. If we cant find it, default to xinput 1.3, which older machines have.
 	if (x_input_library == 0) {
 		//TODO Test this on windows 8
@@ -120,7 +153,14 @@ private_function void win32_load_x_input(void) {
 	
 	if (x_input_library != 0) {
 		XInputGetState = (x_input_get_state*)GetProcAddress(x_input_library, "XInputGetState");
+
+		// If for some reason if we fail to get the methods from our version of xinput, set our methods calls to our stubs
+		if (XInputGetState == 0) { 
+			XInputGetState = XInputGetStateStub; 
+		}
+		
 		XInputSetState = (x_input_set_state*)GetProcAddress(x_input_library, "XInputSetState");
+		if (XInputSetState == 0) { XInputSetState = XInputSetStateStub; }
 	}
 
 }
@@ -243,6 +283,74 @@ private_function void win32_init_d_sound(HWND window, int32 samples_per_second, 
 	}
 	
 
+}
+
+private_function void win32_fill_sound_buffer(win32_SoundOutput* sound_output, DWORD bytes_to_lock, DWORD bytes_to_write) {
+
+	// Readies our buffer for data writing and returns pointers to the beginning of where we can write and the size of our region size
+	// NOTE: If you try and reserve n bytes at a location of the buffer and it is bigger then what the 
+	// rest of the buffer can hold at that point, it will go to the beginning of the buffer and allocate the rest there. This is why there are two region structs
+	// we need to handle.
+	// We need to handle both cases.
+	VOID* region_1;
+	DWORD region_1_size;
+
+	VOID* region_2;
+	DWORD region_2_size;
+
+
+
+	// If we can lock the sound buffer for writing to it.
+	if (SUCCEEDED(global_secondary_sound_buffer->Lock(
+		bytes_to_lock, bytes_to_write,
+		&region_1, &region_1_size,
+		&region_2, &region_2_size,
+		0
+	))) {
+
+		//TODO assert that region1size/region2size is valid 
+		int16* sample_out_region_1 = (int16*)region_1;
+		int16* sample_out_region_2 = (int16*)region_2;
+
+		// Our sizes are byte values. We want the actual number of samples in our buffer to loop through them
+		// So we take size(bytes) / bytes per sample(In this case 32)
+		DWORD region_1_sample_count = region_1_size / sound_output->bytes_per_sample;
+		DWORD region_2_sample_count = region_2_size / sound_output->bytes_per_sample;
+
+		for (DWORD sample_index = 0; sample_index < region_1_sample_count; ++sample_index) {
+
+			//TODO DRAW THIS OUT FOR PEOPLE
+
+			real32 sine_value = sinf(sound_output->t_sine);
+			int16 sample_value = (int16)(sine_value * sound_output->tone_volume);
+
+			*sample_out_region_1++ = sample_value;
+			*sample_out_region_1++ = sample_value;
+
+			sound_output->t_sine += 2.0f * pi32 * 1.0f / (real32)sound_output->wave_period;
+
+			++sound_output->running_sample_index;
+		}
+
+		for (DWORD sample_index = 0; sample_index < region_2_sample_count; ++sample_index) {
+
+			real32 sine_value = sinf(sound_output->t_sine);
+			int16 sample_value = (int16)(sine_value * sound_output->tone_volume);
+
+			*sample_out_region_2++ = sample_value;
+			*sample_out_region_2++ = sample_value;
+
+			sound_output->t_sine += 2.0f * pi32 * 1.0f / (real32)sound_output->wave_period;
+
+			++sound_output->running_sample_index;
+
+		}
+
+		// Unlock the buffer to prevent sound glitches / issues
+		global_secondary_sound_buffer->Unlock(region_1, region_1_size, region_2, region_2_size);
+
+
+	}
 }
 
 private_function win32_WindowDimension get_window_dimension(HWND window) {
@@ -427,8 +535,8 @@ LRESULT CALLBACK win32_main_window_callback(
 		case WM_KEYUP: {
 			uint32 key = wParam;
 
-			bool was_down = ((lParam & (1 << 30)) != 0);
-			bool is_down = ((lParam & (1 << 31)) == 0);
+			bool32 was_down = ((lParam & (1 << 30)) != 0);
+			bool32 is_down = ((lParam & (1 << 31)) == 0);
 
 			// THINK ABOUT WHAT THIS MEANS
 			if (was_down != is_down) {
@@ -487,7 +595,7 @@ LRESULT CALLBACK win32_main_window_callback(
 		} break;
 
 		default: { 
-			result = DefWindowProc(window, message, wParam, lParam);
+			result = DefWindowProcA(window, message, wParam, lParam);
 		}
 	}
 	return result;
@@ -550,44 +658,42 @@ int CALLBACK WinMain(
 
 		// If creating the window handle fails, it returns NULL(or 0 if you prefer). 
 		// So we can check to see if its created easily
-		if(window) {
-			
+		if (window) {
+
 			// Windows doesn't actually start sending messages to a windows callback function until you pull it off a queue. So we loop through the messages and use them continously
 
 			// The loop also functions as our main loop in general that keeps the process going, and as a result, the window from disappering immediatly as soon as its created.
 			// Kinda similar to a game loop
 
-			global_running = true;	
+			global_running = true;
 			int blue_offset = 0;
 			int green_offset = 0;
-	
-			// Represents our hertz value. cycles/per second. Defines what kind of sound plays
-			// The classic 1kHz example(1000 hz) found on the square wave wiki page
-			int tone_hz = 256;
-			int16 tone_volume = 3000;
-			// Counter that keeps track of where we are in our sound buffer to make a square wave.
-			uint32 running_sample_index = 0;
-			int samples_per_second = 48000;
 
-			int bytes_per_sample = sizeof(int16) * 2;
+			win32_SoundOutput sound_output = {};
 
-			// If we want our values in a second to sound like a certain hertz value,
-			// We need to split it up into chunks. So we take our samples per second / hz
-			int square_wave_period = samples_per_second / tone_hz;
-			int half_square_wave_period = square_wave_period / 2;
-			int secondary_sound_buffer_size = samples_per_second * bytes_per_sample;
+			sound_output.samples_per_second = 48000;
+			sound_output.tone_hz = 256;
+			sound_output.tone_volume = 3000;
+			sound_output.running_sample_index = 0;
+			sound_output.wave_period = sound_output.samples_per_second / sound_output.tone_hz;
+			sound_output.bytes_per_sample = sizeof(int16) * 2;
+			sound_output.secondary_sound_buffer_size = sound_output.samples_per_second * sound_output.bytes_per_sample;
+			sound_output.latency_sound_count = sound_output.samples_per_second / 15;
+
 
 			// Initalize direct sound library
 			// NOTE: This direct sound is fairly old and we are using it to be compatible with older machines like XP
-			win32_init_d_sound(window, samples_per_second, samples_per_second * sizeof(int16) * 2);
+			win32_init_d_sound(window, sound_output.samples_per_second, sound_output.samples_per_second * sizeof(int16) * 2);
+			
+			// Fill our soundbuffer and play immediatly so there isn't a delay while waiting for our buffer to be filled for the first time
+			win32_fill_sound_buffer(&sound_output, 0, sound_output.latency_sound_count * sound_output.bytes_per_sample);
+			global_secondary_sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
 
-			bool sound_is_playing = false;
-
-			while(global_running) {
+			while (global_running) {
 
 				// Where we will store the message			
 				MSG message;
-				
+
 
 				while (PeekMessageA(&message, NULL, 0, 0, PM_REMOVE)) {
 
@@ -600,7 +706,7 @@ int CALLBACK WinMain(
 					DispatchMessageA(&message);
 				}
 				// call function to render weird gradient to screen!
-				
+
 				//TODO Should we pull this more frequently?
 				// Get the status of our controller inputs via XInput.
 				// Currently Windows supports up to four xbox controllers but this could change in the future
@@ -611,31 +717,34 @@ int CALLBACK WinMain(
 
 					// If the get the state is successful(IE, the controller is plugged in or exists)
 					if (XInputGetState(controller_index, &controller_state) == ERROR_SUCCESS)
-					{	
+					{
 						// Controller is plugged in 
-						
+
 						// Our gamepad
-						XINPUT_GAMEPAD *gamepad = &(controller_state.Gamepad);
+						XINPUT_GAMEPAD* gamepad = &(controller_state.Gamepad);
 
 						// Get which buttons were pressed on the controller
-						bool dpad_up = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
-						bool dpad_down = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
-						bool dpad_left = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
-						bool gamepad_start = gamepad->wButtons & XINPUT_GAMEPAD_START;
-						bool gamepad_end = gamepad->wButtons & XINPUT_GAMEPAD_BACK;
-						bool gamepad_left_shoulder = gamepad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER;
-						bool gamepad_right_shoulder = gamepad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER;
-						bool gamepad_a = gamepad->wButtons & XINPUT_GAMEPAD_A;
-						bool gamepad_b = gamepad->wButtons & XINPUT_GAMEPAD_B;
-						bool gamepad_x = gamepad->wButtons & XINPUT_GAMEPAD_X;
-						bool gamepad_y = gamepad->wButtons & XINPUT_GAMEPAD_Y;
+						bool32 dpad_up = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
+						bool32 dpad_down = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
+						bool32 dpad_left = gamepad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
+						bool32 gamepad_start = gamepad->wButtons & XINPUT_GAMEPAD_START;
+						bool32 gamepad_end = gamepad->wButtons & XINPUT_GAMEPAD_BACK;
+						bool32 gamepad_left_shoulder = gamepad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER;
+						bool32 gamepad_right_shoulder = gamepad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER;
+						bool32 gamepad_a = gamepad->wButtons & XINPUT_GAMEPAD_A;
+						bool32 gamepad_b = gamepad->wButtons & XINPUT_GAMEPAD_B;
+						bool32 gamepad_x = gamepad->wButtons & XINPUT_GAMEPAD_X;
+						bool32 gamepad_y = gamepad->wButtons & XINPUT_GAMEPAD_Y;
 
 						// Get which way the left stick was tiltted to
 						int16 left_stick_x_position = gamepad->sThumbLX;
 						int16 left_stick_y_position = gamepad->sThumbLY;
 
-						blue_offset += left_stick_x_position >> 12;
-						green_offset += left_stick_y_position >> 12;
+						blue_offset += left_stick_x_position / 4096;
+						green_offset += left_stick_y_position / 4096;
+
+						sound_output.tone_hz = 512 + (int)(256.0f * ((real32)left_stick_y_position / 30000.0f));
+						sound_output.wave_period = sound_output.samples_per_second / sound_output.tone_hz;
 
 					}
 					else
@@ -662,98 +771,39 @@ int CALLBACK WinMain(
 				// If we can get the current position in our sound buffer
 				if (SUCCEEDED(global_secondary_sound_buffer->GetCurrentPosition(&play_cursor, &write_cursor))) {
 					// Where we will write in our sound buffer.
-					DWORD bytes_to_lock = running_sample_index * bytes_per_sample % secondary_sound_buffer_size;
+					DWORD bytes_to_lock = (sound_output.running_sample_index * sound_output.bytes_per_sample) % sound_output.secondary_sound_buffer_size;
 
-				
-
+					// Our offset we want from the play cursor 
+					DWORD target_cursor = ((play_cursor + (sound_output.latency_sound_count * sound_output.bytes_per_sample)) % sound_output.secondary_sound_buffer_size);
+					
 					// The amount of bytes to write to the sound buffer
 					DWORD bytes_to_write;
 
-			
-					// THIS SHOULD NEVER HAPPEN SINCE WE WANT TO ALWAYS WRITE AHEAD OF THE PLAY CURSOR
-					if (bytes_to_lock == play_cursor) {
-						bytes_to_write = secondary_sound_buffer_size;
+					// If where we want to lock our buffer is in front of our targer cursor, write to end of buffer
+					// Then loop around and start at the beginning and write to the target cursor( Non inclusive)
+					// Else, we are before the target cursor and we only have one buffer chunk to work with, from our pointer to the target cursor
+					if (bytes_to_lock > target_cursor) {
+						bytes_to_write = sound_output.secondary_sound_buffer_size - bytes_to_lock;
+						bytes_to_write += target_cursor;
+					}
+					else {
+						bytes_to_write = target_cursor - bytes_to_lock;
 					}
 
-					// If where we want to lock our buffer is in front of our play cursor, write to end of buffer
-					// Then loop around and start at the beginning and write to the play cursor( Non inclusive)
-					// Else, we are before the play cursor and we only have one buffer chunk to work with, from our pointer to the play cursor
-					else if (bytes_to_lock > play_cursor) {
-						bytes_to_write = secondary_sound_buffer_size - bytes_to_lock;
-						bytes_to_write += play_cursor;
-					}else {
-						bytes_to_write = play_cursor - bytes_to_lock;
-					}
-
-					// Readies our buffer for data writing and returns pointers to the beginning of where we can write and the size of our region size
-					// NOTE: If you try and reserve n bytes at a location of the buffer and it is bigger then what the 
-					// rest of the buffer can hold at that point, it will go to the beginning of the buffer and allocate the rest there. This is why there are two region structs
-					// we need to handle.
-					// We need to handle both cases.
-					VOID* region_1;
-					DWORD region_1_size;
-
-					VOID* region_2;
-					DWORD region_2_size;
-
-					
-
-					// If we can lock the sound buffer for writing to it.
-					if (SUCCEEDED(global_secondary_sound_buffer->Lock(
-						bytes_to_lock, bytes_to_write,
-						&region_1, &region_1_size,
-						&region_2, &region_2_size,
-						0
-					))) {
-
-						//TODO assert that region1size/region2size is valid 
-						int16* sample_out_region_1 = (int16*)region_1;
-						int16* sample_out_region_2 = (int16*)region_2;
-
-						// Our sizes are byte values. We want the actual number of samples in our buffer to loop through them
-						// So we take size(bytes) / bytes per sample(In this case 32)
-						DWORD region_1_sample_count = region_1_size / bytes_per_sample;
-						DWORD region_2_sample_count = region_2_size / bytes_per_sample;
-
-						for (DWORD sample_index = 0; sample_index < region_1_sample_count; ++sample_index) {
-						
-							int16 sample_value = ((running_sample_index++ / half_square_wave_period ) % 2) ? tone_volume : -tone_volume;
-							*sample_out_region_1++ = sample_value;
-							*sample_out_region_1++ = sample_value;
-
-						}
-
-						for (DWORD sample_index = 0; sample_index < region_2_sample_count; ++sample_index) {
-						
-							int16 sample_value = ((running_sample_index++ / half_square_wave_period) % 2) ? tone_volume : -tone_volume;
-							*sample_out_region_2++ = sample_value;
-							*sample_out_region_2++ = sample_value;
-						}
-
-						// Unlock the buffer to prevent sound glitches / issues
-						global_secondary_sound_buffer->Unlock(region_1, region_1_size, region_2, region_2_size);
-
-
-					}
+					win32_fill_sound_buffer(&sound_output, bytes_to_lock, bytes_to_write);
 				}
 
-				if (!sound_is_playing) {
-					global_secondary_sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
+					HDC device_context = GetDC(window);
 
-					sound_is_playing = true;
+					win32_WindowDimension window_dimension = get_window_dimension(window);
+
+					win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
+
+					ReleaseDC(window, device_context);
 				}
-
-				HDC device_context = GetDC(window);
-			
-				win32_WindowDimension window_dimension = get_window_dimension(window);	
-			
-			 	win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
-				
-				ReleaseDC(window,device_context);
-			} 
-		}else{
+			}else {
 		
-		}
+			}
 	}else {
 	
 	}
