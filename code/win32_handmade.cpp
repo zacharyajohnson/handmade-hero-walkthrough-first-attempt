@@ -2,6 +2,7 @@
 #include <xinput.h>
 #include <dsound.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <math.h>
 
 
@@ -608,6 +609,18 @@ int CALLBACK WinMain(
   int       showCode 
 ) {
 
+	// The number of times our LARGE_INTEGER value increments per second when windows is measuring time using QueryPerformanceCount
+	// Divide this by the value we get from QueryPerforanceCount to get the actual number of seconds a piece of logic takes to execute
+	LARGE_INTEGER perf_count_frequency_result;
+	QueryPerformanceFrequency(&perf_count_frequency_result);
+	
+	// Gets the number of cpu cycles at the start of our program. CPU cycles don't exactly correlate to walk clock time but instead represent the amount of work the CPU did.
+	// Measured in hertz
+	uint64 last_cpu_cycle_count = __rdtsc();
+
+	// Get the 64 bit version of our result from the struct. 
+	int64 perf_count_frequency = perf_count_frequency_result.QuadPart;
+
 	// Load in our library versions we want to use on our own here
 	win32_load_x_input();
 
@@ -624,6 +637,7 @@ int CALLBACK WinMain(
 	//window_class.hIcon;
 	window_class.lpszClassName = "HandmadeHeroWindowClass";
 
+	
 	// RegisterClass returns a 0 if it fails to register your defined window class
 	// Casey says that this rarely will happen but its good to put notes her for knowledge sake.
 	if(RegisterClassA(&window_class)){
@@ -689,12 +703,15 @@ int CALLBACK WinMain(
 			win32_fill_sound_buffer(&sound_output, 0, sound_output.latency_sound_count * sound_output.bytes_per_sample);
 			global_secondary_sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
 
+			// Get a snapshot of a value that coorisponds to wall clock time before the main game loop runs
+			LARGE_INTEGER last_counter;
+			QueryPerformanceCounter(&last_counter);
+
 			while (global_running) {
 
 				// Where we will store the message			
 				MSG message;
-
-
+			
 				while (PeekMessageA(&message, NULL, 0, 0, PM_REMOVE)) {
 
 					// If windows decides to randomly kill our process, quit
@@ -800,6 +817,42 @@ int CALLBACK WinMain(
 					win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
 
 					ReleaseDC(window, device_context);
+
+					uint64 end_cpu_cycle_count = __rdtsc();
+					
+					LARGE_INTEGER end_counter;
+					QueryPerformanceCounter(&end_counter);
+
+					// Get the total number of cycles for this piece of logic
+					uint64 cpu_cycles_elapsed = end_cpu_cycle_count - last_cpu_cycle_count;
+
+					// Get the total amount of counts the main loop took for one iteration.
+					// Counts is the way windows maps actual cpu cycles / frequencies to a wall clock time.
+					// DO NOT THINK OF THIS AS AN ACTUAL TIMESTAMP LIKE IN JAVA
+					int64 counter_elapsed = end_counter.QuadPart - last_counter.QuadPart;
+
+					// First we multiply our counter_elapsed value to convert to milliseconds
+					// Divide counter_elapsed by our perf_count_frequency(measures counts per second) variable to get the total number milliseconds it took to execute.
+					real64 milliseconds_per_frame = (real64)(((1000.0f * (real64)counter_elapsed) / (real64)perf_count_frequency));
+
+					// Divide the number of counts per second divided by our time elapsed to get our frames per second
+					real64 fps = (real64)perf_count_frequency / (real64)counter_elapsed;
+
+					// mc - megahertz / frame
+					// cpu_cycles_elapsed - in hertz.
+					// / 1000 - kilohertz
+					// / 1000 - megahertz
+					real64 mega_cycles_per_frame = ((real64)cpu_cycles_elapsed / ((real64)1000.0f * (real64)1000.0f));
+					
+					char buffer[256];
+
+					sprintf(buffer,"Milliseconds/frame: %fms/f, %f F/s,  %f mc/f \n", milliseconds_per_frame, fps, mega_cycles_per_frame );
+					OutputDebugStringA(buffer);
+					
+					// Reset the last counter to the value of end counter as our new time value for the beginning of the next iteration of our loop
+					last_counter = end_counter;
+					
+					last_cpu_cycle_count = end_cpu_cycle_count;
 				}
 			}else {
 		
