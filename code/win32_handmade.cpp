@@ -1,3 +1,20 @@
+
+/* TODO THIS IS NOT A FINAL PLATFORM LAYER
+   SAVE GAME LOCATIONS
+   Getting a handle to our executalble file
+   Asset loading path
+   Multi threading
+   Raw input(Multiple keyboards)
+   Sleep/time begin periods
+   Clip cursor - Multi monitor support
+   Fullscreen support
+   WM_SETCURSOR
+   Query cancel autoplay
+   WM_ACTIVATEAPP - When we are the active window
+   Blit speed improvements - bitblit
+   Hardware acceleration - Direct3D / OPENGL / BOTH?
+   GetKeywordLayout - Internatioal wasd support
+*/
 #include <windows.h>
 #include <xinput.h>
 #include <dsound.h>
@@ -49,7 +66,7 @@ typedef double real64;
 // Struct that contains our memory / info about a graphics buffer that we can use to
 // write data to and display on the window 
 // Pixels are always 32 bits wide
-struct Win32_OffscreenBuffer {
+struct Win32OffscreenBuffer {
 	// Struct that contains the info used to create our bitmap
 	BITMAPINFO info;
   
@@ -62,12 +79,12 @@ struct Win32_OffscreenBuffer {
 	int width;
 };
 
-struct win32_WindowDimension {
+struct Win32WindowDimension {
 	int width;
 	int height;
 };
 
-struct win32_SoundOutput {
+struct Win32SoundOutput {
 	
 	int samples_per_second;
 	// Represents our hertz value. cycles/per second. Defines what kind of sound plays
@@ -98,7 +115,7 @@ struct win32_SoundOutput {
 global_variable bool32 global_running;
 
 // Our graphics buffer for our window
-global_variable Win32_OffscreenBuffer global_back_buffer;
+global_variable Win32OffscreenBuffer global_back_buffer;
 
 // Our sound buffer for playing sounds
 global_variable LPDIRECTSOUNDBUFFER global_secondary_sound_buffer;
@@ -168,7 +185,7 @@ private_function void win32_load_x_input(void) {
 
 
 // Sets the buffer values based on offsets.
-private_function void render_weird_gradient(Win32_OffscreenBuffer *buffer, int blue_offset, int green_offset) {
+private_function void render_weird_gradient(Win32OffscreenBuffer *buffer, int blue_offset, int green_offset) {
 
 	// Cast our void pointer to an unsigned 8 bit integer pointer
 	// This in effect moves our pointer 8 bits when we do arthmetic.
@@ -286,7 +303,7 @@ private_function void win32_init_d_sound(HWND window, int32 samples_per_second, 
 
 }
 
-private_function void win32_fill_sound_buffer(win32_SoundOutput* sound_output, DWORD bytes_to_lock, DWORD bytes_to_write) {
+private_function void win32_fill_sound_buffer(Win32SoundOutput* sound_output, DWORD bytes_to_lock, DWORD bytes_to_write) {
 
 	// Readies our buffer for data writing and returns pointers to the beginning of where we can write and the size of our region size
 	// NOTE: If you try and reserve n bytes at a location of the buffer and it is bigger then what the 
@@ -354,7 +371,7 @@ private_function void win32_fill_sound_buffer(win32_SoundOutput* sound_output, D
 	}
 }
 
-private_function win32_WindowDimension get_window_dimension(HWND window) {
+private_function Win32WindowDimension get_window_dimension(HWND window) {
 	RECT client_rect;
 			
 	// First, we call GetClientRect to get the size of our client window
@@ -362,7 +379,7 @@ private_function win32_WindowDimension get_window_dimension(HWND window) {
 	// Since this is what we are drawing to we want this.
 	GetClientRect(window, &client_rect); 
 	
-	win32_WindowDimension window_dimension;
+	Win32WindowDimension window_dimension;
 	// Get the height and width of our rectangle
 
 	// width - right(x-coordiante of lower-right corner) - left(x coordinate of upper-left corner)
@@ -374,7 +391,7 @@ private_function win32_WindowDimension get_window_dimension(HWND window) {
 }
 
 
-private_function void win32_resize_dib_section(Win32_OffscreenBuffer *buffer, int width, int height) {
+private_function void win32_resize_dib_section(Win32OffscreenBuffer *buffer, int width, int height) {
 
 	// If our bitmap_memory has been allocated, we free our memory first so we don't have leaks.
 
@@ -453,7 +470,7 @@ private_function void win32_resize_dib_section(Win32_OffscreenBuffer *buffer, in
 	buffer->pitch = buffer->width * bytes_per_pixel;
 }
 
-private_function void win32_display_buffer_in_window(HDC device_context, Win32_OffscreenBuffer *buffer, int window_width, int window_height) {
+private_function void win32_display_buffer_in_window(HDC device_context, Win32OffscreenBuffer *buffer, int window_width, int window_height) {
 
 	// This function copies color data for a rectancgle of pixels(DIB, JPEG, PNG only) to a specified destination rectangle(Like a window, hence its use here)
 	// Takes the following arguments
@@ -520,7 +537,7 @@ LRESULT CALLBACK win32_main_window_callback(
 			HDC device_context = BeginPaint(window, &paint);
 			
 	
-			win32_WindowDimension window_dimension = get_window_dimension(window);
+			Win32WindowDimension window_dimension = get_window_dimension(window);
 	
 			win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
 			
@@ -683,7 +700,7 @@ int CALLBACK WinMain(
 			int blue_offset = 0;
 			int green_offset = 0;
 
-			win32_SoundOutput sound_output = {};
+			Win32SoundOutput sound_output = {};
 
 			sound_output.samples_per_second = 48000;
 			sound_output.tone_hz = 256;
@@ -812,7 +829,7 @@ int CALLBACK WinMain(
 
 					HDC device_context = GetDC(window);
 
-					win32_WindowDimension window_dimension = get_window_dimension(window);
+					Win32WindowDimension window_dimension = get_window_dimension(window);
 
 					win32_display_buffer_in_window(device_context, &global_back_buffer, window_dimension.width, window_dimension.height);
 
