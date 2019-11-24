@@ -15,17 +15,12 @@
    Hardware acceleration - Direct3D / OPENGL / BOTH?
    GetKeywordLayout - Internatioal wasd support
 */
-#include <windows.h>
-#include <xinput.h>
-#include <dsound.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <math.h>
 
+#include <stdint.h>
 
 // Casey does something intresting and uses #define to define static to the three different things static can mean to make it clearer to himself.
 // and to hunt down instances of things he might want to rethink.
- 
+
 // I actually quite like it.
 
 // Static in C means three different things.
@@ -57,7 +52,14 @@ typedef int32 bool32;
 typedef float real32;
 typedef double real64;
 
+#include "handmade.h"
+#include "handmade.cpp"
 
+#include <windows.h>
+#include <xinput.h>
+#include <dsound.h>
+#include <stdio.h>
+#include <math.h>
 
 
 // DIB - Stands for device independent bitmap. 
@@ -153,6 +155,10 @@ typedef DIRECT_SOUND_CREATE(direct_sound_create);
 #define XInputGetState XInputGetState_
 #define XInputSetState XInputSetState_
 
+void* platform_load_file(char* file_name) {
+	return (0);
+}
+
 // Load our library on our own. Note: We are using version 1.3 because it is supported on a lot more machines then 1.4.
 // If we can't find it, it returns null and we know the machine does not have the proper dlls installed.
 private_function void win32_load_x_input(void) {
@@ -183,47 +189,6 @@ private_function void win32_load_x_input(void) {
 
 }
 
-
-// Sets the buffer values based on offsets.
-private_function void render_weird_gradient(Win32OffscreenBuffer *buffer, int blue_offset, int green_offset) {
-
-	// Cast our void pointer to an unsigned 8 bit integer pointer
-	// This in effect moves our pointer 8 bits when we do arthmetic.
-	// Which lines up well to when we want to get the next row via the pitch calculation
-	// TODO COME BACK TO THIS DEFINITION
-	uint8 *row = (uint8*)buffer->memory;
-
-	// For loop to set individual pixel colors to see if it works
-	for (int y = 0; y < buffer->height; ++y) {
-
-		uint32 *pixel = (uint32*)row;
-
-		for (int x = 0; x < buffer->width; ++x) {
-
-			// LITTLE ENDIAN ARCHITECTURE
-			// lower bytes that make up large data appears first. So 
-			// 00000000 10000000
-			// 10000000 will appear first 
-			// SO to get a red value, we set the second to last byte since its essentially flipped.
-
-			// Some windows history here. Since windows is on a LITTLE ENDIAN architecture,
-			// they decided to flip the bit values in a bitmap to BBGGRRxx so if would naturally flip in the proccesor to RRGGBBxx 
-
-			uint8 blue  = (x + blue_offset);
-			uint8 green = (y + green_offset);
-
-			// Memory:  BB GG RR xx
-			// Register: xx RR GG BB
-			*pixel = (green << 8 | blue);
-
-			++pixel;
-
-
-		}
-		row += buffer->pitch;
-	}
-
-}
 
 private_function void win32_init_d_sound(HWND window, int32 samples_per_second, int32 buffer_size) {
 	// TODO Load the direct sound library itself(dll file)
@@ -792,7 +757,14 @@ int CALLBACK WinMain(
 				//x_input_vibration.wRightMotorSpeed = 60000;
 				//XInputSetState(0, &x_input_vibration);
 
-				render_weird_gradient(&global_back_buffer, blue_offset, green_offset);
+				GameOffscreenBuffer buffer = {};
+				buffer.memory = global_back_buffer.memory;
+				buffer.width = global_back_buffer.width;
+				buffer.height = global_back_buffer.height;
+				buffer.pitch = global_back_buffer.pitch;
+
+				game_update_and_render(&buffer, blue_offset, green_offset);
+
 
 				// NOTE: DirectSound output test
 
@@ -861,10 +833,10 @@ int CALLBACK WinMain(
 					// / 1000 - megahertz
 					real64 mega_cycles_per_frame = ((real64)cpu_cycles_elapsed / ((real64)1000.0f * (real64)1000.0f));
 					
-					char buffer[256];
+					//char buffer[256];
 
-					sprintf(buffer,"Milliseconds/frame: %fms/f, %f F/s,  %f mc/f \n", milliseconds_per_frame, fps, mega_cycles_per_frame );
-					OutputDebugStringA(buffer);
+					//sprintf(buffer,"Milliseconds/frame: %fms/f, %f F/s,  %f mc/f \n", milliseconds_per_frame, fps, mega_cycles_per_frame );
+					//OutputDebugStringA(buffer);
 					
 					// Reset the last counter to the value of end counter as our new time value for the beginning of the next iteration of our loop
 					last_counter = end_counter;
